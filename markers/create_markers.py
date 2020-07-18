@@ -1,18 +1,20 @@
-
-def create_marker(id, sidePixels):
-    from cv2 import aruco
-    
-    dictionary = aruco.getPredefinedDictionary(aruco.DICT_6X6_250)
-    image = aruco.drawMarker(dictionary, id=id, sidePixels=sidePixels)
-    return image
-
 if __name__ == "__main__":
     import sys
     import cv2
     import numpy as np
     
     image = cv2.imread("blank_keyboard.png", cv2.IMREAD_COLOR)
+    dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_250)
     
+    # draw keyboard corners
+    tl_corner = cv2.aruco.drawMarker(dictionary, id=1, sidePixels=100)
+    tr_corner = cv2.aruco.drawMarker(dictionary, id=2, sidePixels=100)
+    for r in range(100):
+        for c in range(100):
+            image[r, c] = tl_corner[r, c]
+    for r in range(100):
+        for c in range(100):
+            image[r, -(100-c)] = tr_corner[r, c]
     
     font = cv2.FONT_HERSHEY_SIMPLEX
     fontscale = 3
@@ -28,8 +30,7 @@ if __name__ == "__main__":
     for r in range(image.shape[0]):
         for c in range(image.shape[1]):
             if list(image[r, c]) == char_indicator:
-                marker_img = create_marker(ord(char_keys[current_char]), 200)
-                marker_img = cv2.resize(marker_img, (marker_length, marker_length))
+                marker_img = cv2.aruco.drawMarker(dictionary, id=ord(char_keys[current_char]), sidePixels=marker_length)
                 for r2 in range(marker_length):
                     for c2 in range(marker_length):
                         image[r + r2, c + c2] = marker_img[r2, c2]
@@ -43,4 +44,4 @@ if __name__ == "__main__":
                 current_char += 1
         print(r)
     
-    cv2.imwrite("keyboard.png", image)
+    cv2.imwrite("keyboard_4X4_250.png", image)

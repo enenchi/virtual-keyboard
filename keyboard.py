@@ -5,13 +5,13 @@ import math
 import time
 
 # ArUco marker and keyboard information
-DICTIONARY = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+DICTIONARY = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_250)
 KEYBOARD_DIM = (3273, 1228)
 MARKER_DIM = 100
 
 # state information
 class States:
-    _REF = "keyboard_ref.png"
+    _REF = "keyboard_ref_4X4_250.png"
     RELEASED    = 1
     PRESSED     = 0
     RELEASED_TO_PRESSED = RELEASED - PRESSED
@@ -74,6 +74,9 @@ class States:
     
     def __getitem__(self, item):
         return self.states[item]
+    
+    def ids(self):
+        return list(self.states.keys())
 
 class Keyboard:
     DEPRIME_TIME = 0.75
@@ -271,17 +274,27 @@ if __name__ == "__main__":
         controller = Controller()
         
         cap = cv2.VideoCapture(0)
-        cap.set(3, 1920);
+        cap.set(3, 1920)
+        #cap.set(3, 1280)
         cap.set(4, 1080)
+        #cap.set(4, 720)
         
-        disp_scale = 1 / 8
+        disp_scale = 1 / 4
         size = (int(KEYBOARD_DIM[0] * disp_scale), int(KEYBOARD_DIM[1] * disp_scale))
         ret, frame = cap.read()
         markers, _, _, _ = get_markers(frame)
         while True:
             ret, frame = cap.read()
             if ret:
-                markers, _, _, _ = get_markers(frame)
+                markers, corners, ids, _ = get_markers(frame)
+                frame = cv2.aruco.drawDetectedMarkers(frame, corners, ids)
+                ids = set(states.ids())
+                found = set(markers.keys())
+                if ids == found:
+                    print("Found all markers")
+                else:
+                    print("Missing", ids.difference(found))
+                    print("With extra", found.difference(ids))
                 frame = cv2.resize(frame, size)
                 cv2.imshow('frame', frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -290,9 +303,10 @@ if __name__ == "__main__":
         try:
             while True:
                 ret, frame = cap.read()
-                start_time = time.time()
+                #start_time = time.time()
                 if ret:
                     markers, _, _, _ = get_markers(frame)
+                    #print("# markers:", len(markers))
                     transitions, typed_keys = process_markers(markers, states, keys)
                     
                     if typed_keys:
@@ -308,7 +322,7 @@ if __name__ == "__main__":
                     """
                 else:
                     break
-                print("--- %s seconds ---" % (time.time() - start_time))
+                #print("--- %s seconds ---" % (time.time() - start_time))
         except KeyboardInterrupt:
             pass
         finally:
