@@ -6,135 +6,140 @@ import time
 
 # ArUco marker and keyboard information
 DICTIONARY = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_250)
-KEYBOARD_DIM = (3273, 1228)
+KEYBOARD_DIM = None
 MARKER_DIM = 100
 
-# state information
-class States:
-    _REF = "keyboard_ref_4X4_250.png"
-    RELEASED    = 1
-    PRESSED     = 0
-    RELEASED_TO_PRESSED = RELEASED - PRESSED
-    PRESSED_TO_RELEASED = PRESSED - RELEASED
-    
-    def to_text(id):
-        if id >= ord("a") and id <= ord("z"):
-            return chr(id - ord("a") + ord("A"))
-        raise ValueError("%d should not have been found" % id)
-    
-    def __init__(self):
-        # read reference image
-        reference = cv2.imread(States._REF, cv2.IMREAD_GRAYSCALE)
-        markers, _, _, _ = get_markers(reference)
-        
-        # initialize states and positions
-        self.states = dict()
-        self.positions = dict()
-        for id in markers:
-            self.states[id] = States.RELEASED
-            self.positions[id] = int(markers[id][0][0]), int(markers[id][0][1])
-    
-    def update(self, ids):
-        """
-        Updates the states. Returns the state transitions
-        """
-        transitions = dict()
-        for id in self.states:
-            old_state = self.states[id]
-            new_state = States.RELEASED if id in ids else States.PRESSED
-            self.states[id] = new_state
-            transitions[id] = old_state - new_state
-            #if old_state - new_state != 0:
-                #print("State: %s <- %d" % (chr(id), new_state))
-        return transitions
-    
-    def draw_states(self, image, scale, font=cv2.FONT_HERSHEY_SIMPLEX, fontscale=0.5, color=255, thickness=2):
-        for id in self.states:
-            x, y = self.positions[id]
-            x = int(x * scale)
-            y = int(y * scale)
-            cv2.putText(image, str(self.states[id]), (x, y), font, fontscale, color, thickness)
-    
-    def draw_transitions(self, image, transitions, scale, font=cv2.FONT_HERSHEY_SIMPLEX, fontscale=0.5, color=255, thickness=2):
-        for id in transitions:
-            text = States.to_text(id)
-            if transitions[id] == States.PRESSED_TO_RELEASED:
-                text = "-" + text
-            elif transitions[id] == States.RELEASED_TO_PRESSED:
-                text = "+" + text
-            else:
-                text = ""
-            x, y = self.positions[id]
-            x = int(x * scale)
-            y = int(y * scale)
-            cv2.putText(image, str(transitions[id]), (x, y), font, fontscale, color, thickness)
-    
-    def __iter__(self):
-        return iter(self.states)
-    
-    def __getitem__(self, item):
-        return self.states[item]
-    
-    def ids(self):
-        return list(self.states.keys())
+REFERENCE = "keyboard_ref_4X4_250.png"
+
+def build_keyboard(markers):
+    # map pixel row to ids in that row
+    board = dict()
+    for id in markers:
+        row = markers[id][0][1]
+        if row in board:
+            board[row].append(id)
+        else:
+            board[row] = [id]
+    return [set(board[key]) for key in sorted(board.keys())]
 
 class Keyboard:
-    DEPRIME_TIME = 0.75
-    MIN_DELAY = 1
-    MAX_DELAY = 2
+    RELEASED    = 0
+    TO_PRESSED  = 1
+    PRESSED     = 2
+    COVERED     = 3
     
-    ROWS_CH = ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
-    ROWS_ID = None
+    UP      = True
+    DOWN    = False
     
-    def __init__(self, states):
+    TO_PRESSED_DELAY    = 0.25  # Time required in the DOWN history to transition RELEASED->TO_PRESSED
+    PRESSED_DELAY       = 0.75  # Time required in the DOWN history to transition TO_PRESSED->PRESSED
+    COVERED_DELAY       = 1     # Time required in the DOWN history to transition PRESSED->COVERED
+    
+    def __init__(self, ref_image):
+        # get markers from reference image
+        markers, _, _, _ = get_markers(ref_image)
+        
+        # build states
+        self.states = dict()
+        
+        # build the keyboard
+        self.board = build_keyboard(markers)
+        
+        # build positions
+        self.positions = dict()
+        ref_height, ref_width = ref_image.shape[:2]
+        
+        # build histories
         self.histories = dict()
-        self.primed = dict()
+        
         timestamp = time.time()
-        for id in states:
-            self.histories[id] = [(states[id], timestamp)]
-            self.primed[id] = False
-        if Keyboard.ROWS_ID == None:
-            Keyboard.ROWS_ID = []
-            for row in Keyboard.ROWS_CH:
-                Keyboard.ROWS_ID.append(set([ord(c) for c in row]))
+        for id in markers:
+            # states
+            self.states[id] = Keyboard.RELEASED
+            # positions
+            corner = markers[id][0]
+            self.positions[id] = corner[0] / ref_width, corner[1] / ref_height
+            # histories and primed
+            self.histories[id] = (Keyboard.UP, timestamp)
     
-    def update(self, states):
-        typed_keys = []
+    def update(self, samples):
+        transitions = dict()
+        pressed_keys = set()
+        released_keys = set()
+        
         timestamp = time.time()
-        for id in states:
-            state = states[id]
-            prev, prev_time = self.histories[id][-1]
-            if state == States.PRESSED and prev == States.PRESSED:
-                diff = timestamp - prev_time
-                # de-prime rows under this id
-                if diff > Keyboard.DEPRIME_TIME:
-                    for i in range(len(Keyboard.ROWS_ID)):
-                        if id in Keyboard.ROWS_ID[i]:
-                            for i in range(i + 1, len(Keyboard.ROWS_ID)):
-                                for id in Keyboard.ROWS_ID[i]:
-                                    self.primed[id] = False
-                                    #print("De-primed %s" % chr(id))
-            if prev != state:
-                self.histories[id].append((state, timestamp))
-                if state == States.PRESSED:
-                    self.primed[id] = True
-                elif state == States.RELEASED:
-                    if self.primed[id]:
-                        diff = timestamp - prev_time
-                        if diff > Keyboard.MIN_DELAY and diff < Keyboard.MAX_DELAY:
-                            typed_keys.append(id)
-                            #print(chr(id), timestamp - prev_time, self.histories[id])
-                    self.primed[id] = False
-                if len(self.histories[id]) > 2:
-                    self.histories[id] = self.histories[id][-2:]
-        return typed_keys
+        for id in self.states:
+            # determine sample; if id was in samples, the key sample is released
+            sample = id in samples
+            
+            prev_sample, prev_time = self.histories[id]
+            diff = timestamp - prev_time
+            
+            # update state machine
+            old_state = self.states[id]
+            if old_state == Keyboard.RELEASED:
+                if sample == Keyboard.DOWN and prev_sample == Keyboard.DOWN and diff > Keyboard.TO_PRESSED_DELAY:
+                    self.states[id] = Keyboard.TO_PRESSED
+                    # cover all keys below this one
+                    for i in range(len(self.board)):
+                        if id in self.board[i]:
+                            for row in self.board[i+1:]:
+                                for id2 in row:
+                                    self.states[id2] = Keyboard.COVERED
+                                    #print("Deprimed:", ids)
+                            break
+            elif old_state == Keyboard.TO_PRESSED:
+                if sample == Keyboard.UP:
+                    self.states[id] = Keyboard.RELEASED
+                elif diff > Keyboard.PRESSED_DELAY:
+                    self.states[id] = Keyboard.PRESSED
+            elif old_state == Keyboard.PRESSED:
+                if sample == Keyboard.UP:
+                    self.states[id] = Keyboard.RELEASED
+                elif diff > Keyboard.COVERED_DELAY: # if state is PRESSED, the history has to be all DOWN
+                    self.states[id] = Keyboard.COVERED
+            elif old_state == Keyboard.COVERED:
+                if sample == Keyboard.UP:
+                    self.states[id] = Keyboard.RELEASED
+            
+            # update history
+            if sample != prev_sample:
+                self.histories[id] = (sample, timestamp)
+            
+            # fill return values
+            transitions[id] = self.states[id] - old_state
+            if transitions[id] != 0:
+                state = self.states[id]
+                if state == Keyboard.RELEASED:
+                    released_keys.add(id)
+                elif state == Keyboard.TO_PRESSED:
+                    pass
+                elif state == Keyboard.PRESSED:
+                    pressed_keys.add(id)
+                elif state == Keyboard.COVERED:
+                    released_keys.add(id)
+                #print("State:", chr(id), "<-", state)
+        
+        return transitions, pressed_keys, released_keys
+
+    def ids(self):
+        return set(self.states.keys())
+    
+    def draw_info(self, image, info, font=cv2.FONT_HERSHEY_SIMPLEX, fontscale=0.5, color=255, thickness=2):
+        """
+        Draws the string version of the info values into the corresponding key position
+        """
+        height, width = image.shape[:2]
+        for id in self.states:
+            x, y = self.positions[id]
+            cv2.putText(image, str(info[id]), (int(x*width), int(y*height)), font, fontscale, color, thickness)
 
 def show_image(name, image):
     cv2.imshow(name, image)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
-def markers_12(markers):
+def get_transformation(markers):
     """
     Returns the transformation needed to isolate the keyboard and a tuple
     of the resulting image size.
@@ -242,16 +247,13 @@ def extract_keyboard(image, scale):
         image = cv2.aruco.drawDetectedMarkers(gray, corners, ids)
     return image, markers
 
-def process_markers(markers, states, keys):
+def process_markers(markers, keyboard):
     """
     Returns transitions and the typed keys
     """
-    transitions = states.update(markers.keys())
-    typed_keys = keys.update(states)
-    
-    return transitions, typed_keys
+    return keyboard.update(set(markers.keys()))
 
-def process_frame(frame, markers, states, keys, scale, draw_state=False, draw_transition=False):
+def process_frame(frame, markers, keyboard, scale, draw_state=False, draw_transition=False):
     image, markers = extract_keyboard(frame, scale)
     
     state_scale = image.shape[1] / KEYBOARD_DIM[0]
@@ -260,69 +262,114 @@ def process_frame(frame, markers, states, keys, scale, draw_state=False, draw_tr
     if draw_transition:
         states.draw_transitions(image, transitions, state_scale)
     
-    return process_markers(markers, states, keys)
+    return process_markers(markers, keyboard)
+
+"""
+if __name__ == "__main__":
+    import sys
+    
+    ref_image = cv2.imread(REFERENCE, cv2.IMREAD_GRAYSCALE)
+    markers, _, _, _ = get_markers(ref_image)
+    board = build_keyboard(markers)
+    for row in board:
+        for i in range(len(row)):
+            row[i] = chr(row[i])
+    print(board)
+    
+    sys.exit(1)
+"""
+
+def to_keyvalue(id):
+    if id >= ord("a") and id <= ord("z"):
+        return chr(id)
+    raise ValueError("%d should not have been found" % id)
 
 if __name__ == "__main__":
     import sys
     
     scale = 1
-    states = States()
-    keys = Keyboard(states)
+    
+    reference_image = cv2.imread(REFERENCE, cv2.IMREAD_GRAYSCALE)
+    KEYBOARD_DIM = reference_image.shape[1], reference_image.shape[0]
+    keyboard = Keyboard(reference_image)
     
     if len(sys.argv) == 1:
-        from pynput.keyboard import Key, Controller
+        from pynput.keyboard import Controller
         controller = Controller()
+        
+        all_keys = set(keyboard.ids())
         
         cap = cv2.VideoCapture(0)
         cap.set(3, 1920)
-        #cap.set(3, 1280)
         cap.set(4, 1080)
+        #cap.set(3, 1280)
         #cap.set(4, 720)
         
-        disp_scale = 1 / 4
-        size = (int(KEYBOARD_DIM[0] * disp_scale), int(KEYBOARD_DIM[1] * disp_scale))
-        ret, frame = cap.read()
-        markers, _, _, _ = get_markers(frame)
+        #disp_scale = 1 / 4
+        #disp_size = (int(KEYBOARD_DIM[0] * disp_scale), int(KEYBOARD_DIM[1] * disp_scale))
+        scale = 3 / 4
+        
         while True:
             ret, frame = cap.read()
             if ret:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                height, width = frame.shape[:2]
+                frame = cv2.resize(frame, (int(width * scale), int(height * scale)))
                 markers, corners, ids, _ = get_markers(frame)
-                frame = cv2.aruco.drawDetectedMarkers(frame, corners, ids)
-                ids = set(states.ids())
+                
+                # print which ids are found and which are missing
                 found = set(markers.keys())
-                if ids == found:
+                if all_keys == found:
                     print("Found all markers")
                 else:
-                    print("Missing", ids.difference(found))
-                    print("With extra", found.difference(ids))
-                frame = cv2.resize(frame, size)
+                    print("Missing", all_keys.difference(found))
+                    print("With extra", found.difference(all_keys))
+                
+                # show frame with all detected markers
+                frame = cv2.aruco.drawDetectedMarkers(frame, corners, ids)
                 cv2.imshow('frame', frame)
+                
+                # break if the user pressed q to continue with the program
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
+            else:
+                print("Reading from camera failed. Exiting.")
+                cap.release()
+                cv2.destroyAllWindows()
+                sys.exit(0)
+        
         cv2.destroyAllWindows()
         try:
             while True:
                 ret, frame = cap.read()
-                #start_time = time.time()
+                start_time = time.time()
                 if ret:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    height, width = frame.shape[:2]
+                    frame = cv2.resize(frame, (int(width * scale), int(height * scale)))
+                    
                     markers, _, _, _ = get_markers(frame)
                     #print("# markers:", len(markers))
-                    transitions, typed_keys = process_markers(markers, states, keys)
+                    transitions, pressed_keys, released_keys = process_markers(markers, keyboard)
                     
-                    if typed_keys:
-                        for key in typed_keys:
-                            print(chr(key))
-                            controller.type(chr(key))
-                        #print(chars)
+                    for key in transitions:
+                        if key in pressed_keys:
+                            value = to_keyvalue(key)
+                            controller.press(value)
+                            print("Pressed:", value)
+                        elif key in released_keys:
+                            value = to_keyvalue(key)
+                            controller.release(value)
+                            print("Released:", value)
                     
                     """
-                    image = cv2.resize(image, size)
-                    cv2.imshow('video', image)
+                    frame = cv2.resize(frame, disp_size)
+                    cv2.imshow('video', frame)
                     cv2.waitKey(1)
                     """
                 else:
                     break
-                #print("--- %s seconds ---" % (time.time() - start_time))
+                print("--- %s seconds ---" % (time.time() - start_time))
         except KeyboardInterrupt:
             pass
         finally:
