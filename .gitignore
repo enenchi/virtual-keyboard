@@ -1,0 +1,11 @@
+*.jpg
+*.mp4
+*.heic
+*.png
+!/keyboard_ref*.png
+!/markers/keyboard*.png
+!/markers/blank_keyboard.png
+
+/calibration/
+/tests/
+
