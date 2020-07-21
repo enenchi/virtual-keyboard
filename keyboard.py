@@ -31,9 +31,9 @@ class Keyboard:
     UP      = True
     DOWN    = False
     
-    TO_PRESSED_DELAY    = 0.25  # Time required in the DOWN history to transition RELEASED->TO_PRESSED
-    PRESSED_DELAY       = 0.75  # Time required in the DOWN history to transition TO_PRESSED->PRESSED
-    COVERED_DELAY       = 1     # Time required in the DOWN history to transition PRESSED->COVERED
+    TO_PRESSED_DELAY    = 0.15  # Time required in the DOWN history to transition RELEASED->TO_PRESSED
+    PRESSED_DELAY       = 0.45  # Time required in the DOWN history to transition TO_PRESSED->PRESSED
+    COVERED_DELAY       = 0.60  # Time required in the DOWN history to transition PRESSED->COVERED
     
     def __init__(self, ref_image):
         # get markers from reference image
@@ -93,11 +93,14 @@ class Keyboard:
                     self.states[id] = Keyboard.RELEASED
                 elif diff > Keyboard.PRESSED_DELAY:
                     self.states[id] = Keyboard.PRESSED
+                    pressed_keys.add(id) # add to pressed
             elif old_state == Keyboard.PRESSED:
                 if sample == Keyboard.UP:
                     self.states[id] = Keyboard.RELEASED
+                    released_keys.add(id) # add to released
                 elif diff > Keyboard.COVERED_DELAY: # if state is PRESSED, the history has to be all DOWN
                     self.states[id] = Keyboard.COVERED
+                    released_keys.add(id) # add to released
             elif old_state == Keyboard.COVERED:
                 if sample == Keyboard.UP:
                     self.states[id] = Keyboard.RELEASED
@@ -108,19 +111,24 @@ class Keyboard:
             
             # fill return values
             transitions[id] = self.states[id] - old_state
-            if transitions[id] != 0:
-                state = self.states[id]
-                if state == Keyboard.RELEASED:
-                    released_keys.add(id)
-                elif state == Keyboard.TO_PRESSED:
-                    pass
-                elif state == Keyboard.PRESSED:
-                    pressed_keys.add(id)
-                elif state == Keyboard.COVERED:
-                    released_keys.add(id)
-                #print("State:", chr(id), "<-", state)
+            #if transitions[id] != 0:
+            #   print("State:", chr(id), "<-", state)
         
         return transitions, pressed_keys, released_keys
+    
+    def reset(self):
+        """
+        Sets all states to RELEASED and all histories to UP at the current timestamp.
+        Returns keys that went from pressed to released.
+        """
+        pressed_keys = set()
+        timestamp = time.time()
+        for id in self.states:
+            if self.states[id] == Keyboard.PRESSED:
+                pressed_keys.add(id)
+            self.states[id] = Keyboard.RELEASED
+            self.histories[id] = (Keyboard.UP, timestamp)
+        return pressed_keys
 
     def ids(self):
         return set(self.states.keys())
@@ -168,7 +176,7 @@ def get_transformation(markers):
     
     # get perspective transformation matrix
     M = cv2.getPerspectiveTransform(src_rect, dest_rect)
-    # add y shift
+    # apply y shift
     for j in range(3):
         M[1][j] += M[2][j] * -box_h
     
@@ -199,14 +207,15 @@ def resize_corners(corners, scale):
             pair[1] *= scale
     return copy
 
+def transform_coord(pair, M):
+    coord = [pair[0], pair[1], 1]
+    scalar = M[2].dot(coord)
+    return [M[0].dot(coord) / scalar, M[1].dot(coord) / scalar]
+
 def transform_corners(corners, M):
     copy = corners.copy()
     for corner in copy:
-        for pair in corner[0]:
-            coord = [pair[0], pair[1], 1]
-            scalar = M[2].dot(coord)
-            pair[0] = M[0].dot(coord) / scalar
-            pair[1] = M[1].dot(coord) / scalar
+        corner[0] = np.array([transform_coord(pair, M) for pair in corner[0]], np.float32)
     return copy
 
 def extract_keyboard(image, scale):
@@ -229,7 +238,7 @@ def extract_keyboard(image, scale):
     # get tilted small image
     if (1 in markers) and (2 in markers):
         # get transform for original image
-        M, size = markers_12(markers)
+        M, size = get_transformation(markers)
         # apply scalling
         for j in range(3):
             M[2][j] /= scale
@@ -264,21 +273,6 @@ def process_frame(frame, markers, keyboard, scale, draw_state=False, draw_transi
     
     return process_markers(markers, keyboard)
 
-"""
-if __name__ == "__main__":
-    import sys
-    
-    ref_image = cv2.imread(REFERENCE, cv2.IMREAD_GRAYSCALE)
-    markers, _, _, _ = get_markers(ref_image)
-    board = build_keyboard(markers)
-    for row in board:
-        for i in range(len(row)):
-            row[i] = chr(row[i])
-    print(board)
-    
-    sys.exit(1)
-"""
-
 def to_keyvalue(id):
     if id >= ord("a") and id <= ord("z"):
         return chr(id)
@@ -287,34 +281,73 @@ def to_keyvalue(id):
 if __name__ == "__main__":
     import sys
     
-    scale = 1
-    
     reference_image = cv2.imread(REFERENCE, cv2.IMREAD_GRAYSCALE)
     KEYBOARD_DIM = reference_image.shape[1], reference_image.shape[0]
     keyboard = Keyboard(reference_image)
+    all_keys = set(keyboard.ids())
     
-    if len(sys.argv) == 1:
-        from pynput.keyboard import Controller
-        controller = Controller()
-        
-        all_keys = set(keyboard.ids())
-        
-        cap = cv2.VideoCapture(0)
-        cap.set(3, 1920)
-        cap.set(4, 1080)
-        #cap.set(3, 1280)
-        #cap.set(4, 720)
-        
-        #disp_scale = 1 / 4
-        #disp_size = (int(KEYBOARD_DIM[0] * disp_scale), int(KEYBOARD_DIM[1] * disp_scale))
-        scale = 3 / 4
-        
-        while True:
-            ret, frame = cap.read()
-            if ret:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                height, width = frame.shape[:2]
-                frame = cv2.resize(frame, (int(width * scale), int(height * scale)))
+    from pynput.keyboard import Controller
+    controller = Controller()
+    
+    scale = 3 / 4
+    resolution = (1920, 1080) # (1280, 720)
+    scaled_resolution = tuple(map(lambda x: int(x * scale), resolution))
+    disp_resolution = (640, 480)
+    
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, resolution[0])
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, resolution[1])
+    cap.set(cv2.CAP_PROP_MONOCHROME, 1)
+    
+    marker1_box = [[0, 0], [2, 2]]
+    marker2_box = [[0, 0], [2, 2]]
+    keyboard_box = [[0, 0], [2, 2]]
+    
+    def get_roi_boxes(image, margin=1):
+        print("Finding ROIs")
+        markers, corners, ids, _ = get_markers(image)
+        box1, box2, box = None, None, None
+        if 1 in markers:
+            x, y, w, h = cv2.boundingRect(markers[1])
+            dx1 = w * margin
+            dy1 = h * margin
+            box1 = [[int(x - dx1), int(y - dy1)], [int(x + w + dx1), int(y + h + dy1)]]
+        if 2 in markers:
+            x, y, w, h = cv2.boundingRect(markers[2])
+            dx2 = w * margin
+            dy2 = h * margin
+            box2 = [[int(x - dx2), int(y - dy2)], [int(x + w + dx2), int(y + h + dy2)]]
+        if 2 in markers and 1 in markers:
+            M, size = get_transformation(markers)
+            M_inv = cv2.invert(M)[1]
+            corners = [[[[0, 0], [size[0], 0], [size[0], size[1]], [0, size[1]]]]]
+            corners = transform_corners(corners, M_inv)
+            x, y, w, h = cv2.boundingRect(corners[0][0])
+            dx = max(dx1, dx2)
+            dy = max(dy1, dy2)
+            box = [[int(x - dx), int(y - dy)], [int(x + w + dx), int(y + h + dy)]]
+        return box1, box2, box
+    
+    while True:
+        ret, frame = cap.read()
+        if ret:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frame = cv2.resize(frame, scaled_resolution)
+            
+            # test marker 1 and 2
+            if marker1_box != None:
+                markers, _, _, _ = get_markers(frame[marker1_box[0][1]:marker1_box[1][1], marker1_box[0][0]:marker1_box[1][0]])
+            
+            if 1 not in markers:
+                marker1_box, marker2_box, keyboard_box = get_roi_boxes(frame)
+            else:
+                if marker2_box != None:
+                    markers, _, _, _ = get_markers(frame[marker2_box[0][1]:marker2_box[1][1], marker2_box[0][0]:marker2_box[1][0]])
+                if 2 not in markers:
+                    marker1_box, marker2_box, keyboard_box = get_roi_boxes(frame)
+            
+            if marker1_box != None and marker2_box != None and keyboard_box != None:
+                #frame = frame[keyboard_box[0][1]:keyboard_box[1][1], keyboard_box[0][0]:keyboard_box[1][0]]
                 markers, corners, ids, _ = get_markers(frame)
                 
                 # print which ids are found and which are missing
@@ -325,121 +358,88 @@ if __name__ == "__main__":
                     print("Missing", all_keys.difference(found))
                     print("With extra", found.difference(all_keys))
                 
-                # show frame with all detected markers
+                # draw
                 frame = cv2.aruco.drawDetectedMarkers(frame, corners, ids)
-                cv2.imshow('frame', frame)
-                
-                # break if the user pressed q to continue with the program
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                frame = cv2.rectangle(frame, tuple(marker1_box[0]), tuple(marker1_box[1]), 0, 2)
+                frame = cv2.rectangle(frame, tuple(marker2_box[0]), tuple(marker2_box[1]), 0, 2)
+                frame = cv2.rectangle(frame, tuple(keyboard_box[0]), tuple(keyboard_box[1]), 0, 2)
             else:
-                print("Reading from camera failed. Exiting.")
-                cap.release()
-                cv2.destroyAllWindows()
-                sys.exit(0)
+                print("Could not find markers 1 and 2")
+            
+            # show frame with all detected markers
+            frame = cv2.resize(frame, disp_resolution)
+            cv2.imshow('frame', frame)
         
-        cv2.destroyAllWindows()
-        try:
-            while True:
-                ret, frame = cap.read()
-                start_time = time.time()
-                if ret:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    height, width = frame.shape[:2]
-                    frame = cv2.resize(frame, (int(width * scale), int(height * scale)))
-                    
+            # break if the user pressed q to continue with the program
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+            continue
+
+        else:
+            print("Reading from camera failed. Exiting.")
+            cap.release()
+            cv2.destroyAllWindows()
+            sys.exit(0)
+    
+    cv2.destroyAllWindows()
+    try:
+        total = 0
+        num = 0
+        while True:
+            ret, frame = cap.read()
+            start_time = time.time()
+            if ret:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                frame = cv2.resize(frame, scaled_resolution)
+                markers = {}
+                
+                # test marker 1 and 2
+                if marker1_box != None:
+                    markers, _, _, _ = get_markers(frame[marker1_box[0][1]:marker1_box[1][1], marker1_box[0][0]:marker1_box[1][0]])
+                
+                if 1 not in markers:
+                    marker1_box, marker2_box, keyboard_box = get_roi_boxes(frame)
+                else:
+                    if marker2_box != None:
+                        markers, _, _, _ = get_markers(frame[marker2_box[0][1]:marker2_box[1][1], marker2_box[0][0]:marker2_box[1][0]])
+                    if 2 not in markers:
+                        marker1_box, marker2_box, keyboard_box = get_roi_boxes(frame)
+                
+                if marker1_box != None and marker2_box != None and keyboard_box != None:
+                    frame = frame[keyboard_box[0][1]:keyboard_box[1][1], keyboard_box[0][0]:keyboard_box[1][0]]
+                
                     markers, _, _, _ = get_markers(frame)
-                    #print("# markers:", len(markers))
+                    
                     transitions, pressed_keys, released_keys = process_markers(markers, keyboard)
                     
                     for key in transitions:
+                        value = to_keyvalue(key)
                         if key in pressed_keys:
-                            value = to_keyvalue(key)
                             controller.press(value)
                             print("Pressed:", value)
                         elif key in released_keys:
-                            value = to_keyvalue(key)
                             controller.release(value)
                             print("Released:", value)
-                    
-                    """
-                    frame = cv2.resize(frame, disp_size)
-                    cv2.imshow('video', frame)
-                    cv2.waitKey(1)
-                    """
                 else:
-                    break
-                print("--- %s seconds ---" % (time.time() - start_time))
-        except KeyboardInterrupt:
-            pass
-        finally:
-            cap.release()
-            cv2.destroyAllWindows()
-        sys.exit(0)
-    
-    if len(sys.argv) != 3:
-        print("Incorrect argument amount [-i|-m filename]")
-        sys.exit(1)
-    
-    if sys.argv[1] == "-i":
-        start_time = time.time()
-        
-        frame = cv2.imread(sys.argv[2], cv2.IMREAD_GRAYSCALE)
-        
-        image, typed_keys = process_frame(frame, states, keys, scale)
-        
-        print("--- %s seconds ---" % (time.time() - start_time))
-        cv2.imwrite("out.jpg", image)
-        show_image("final image", image)
-    elif sys.argv[1] == "-m":
-        cap = cv2.VideoCapture(sys.argv[2])
-        
-        frames = []
-        
-        start_time = time.time()
-        while(cap.isOpened()):
-            
-            ret, frame = cap.read()
-            time.sleep(1/30)
-            
-            if ret:
-                image, typed_keys = process_frame(frame, states, keys, scale)
-                
-                
-                chars = []
-                if typed_keys:
-                    for key in typed_keys:
-                        chars.append(chr(key))
-                    print(chars)
-        
-                #cv2.putText(image, str(chars) + str(time.time() - start_time), (0, image.shape[0]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, 255, 2)
-                
-                frames.append(image)    
-                
-                if len(frames) >= 100:
-                    break
+                    print("Keyboard not found")
+                    pressed_keys = keyboard.reset()
+                    for key in pressed_keys:
+                        value = to_keyvalue(key)
+                        controller.release(value)
+                        print("Reset:", value)
+                """
+                frame = cv2.resize(frame, disp_resolution)
+                cv2.imshow('video', frame)
+                cv2.waitKey(1)
+                """
             else:
                 break
-        print("--- avg %s seconds per frame---" % ((time.time() - start_time) / len(frames)))
-        
-        sys.exit(1)
-        
-        import os
-        import shutil
-        dirname = "%s_output" % sys.argv[2][:sys.argv[2].rfind(".")]
-        if os.path.exists(dirname):
-            shutil.rmtree(dirname)
-        os.mkdir(dirname)
-        
-        height, width = frames[0].shape[:2]
-        height += height % 2
-        width += width % 2
-        for index, frame in zip(range(len(frames)), frames):
-            frame = cv2.resize(frame, (width, height))
-            cv2.imwrite(os.path.join(dirname, "%05d.png" % index), frame)
-        
-        os.system("ffmpeg -framerate 30 -pattern_type glob -i '%s/*.png' -c:v libx264 -r 30 -pix_fmt yuv420p out.mp4" % dirname)
-        
+            #print("--- %s seconds ---" % (time.time() - start_time))
+            total += (time.time() - start_time)
+            num += 1
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print(total / num)
         cap.release()
         cv2.destroyAllWindows()
-    
